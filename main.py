@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
+import requests
 
 # --- 系统配置常量 ---
 LEVERAGED_ETFS = ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "TNA", "TZA", "NVDL", "FAS", "FAZ"]
@@ -43,33 +44,39 @@ def get_market_structure(ticker, data_5m):
         return round(poc, 2), round(np.ceil((curr_p * 1.03) / step) * step, 2), round(np.floor((curr_p * 0.97) / step) * step, 2)
     except: return 0, 0, 0
 
-# --- 核心算法 3：财报预警 ---
-def get_earnings_status(ticker):
+# --- 增强版数据获取：增加 Session 模拟浏览器 ---
+# 定义一个全局 Session，带上正常的浏览器 User-Agent
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+})
+
+def get_earnings_status(ticker_symbol):
     try:
-        tick = yf.Ticker(ticker)
-        # 增加 session 模拟，降低被拦截概率
-        earnings_dates = tick.calendar 
+        # 传入 session 绕过简单的反爬
+        tick = yf.Ticker(ticker_symbol, session=session)
         
-        # 增加对数据为空的判断逻辑
-        if earnings_dates is None or (isinstance(earnings_dates, pd.DataFrame) and earnings_dates.empty):
-            # 尝试通过 info 字段作为补充备选（有时 calendar 失效，info 仍有数据）
+        # 1. 优先尝试 calendar
+        earnings_dates = tick.calendar
+        if earnings_dates is not None and not earnings_dates.empty:
+            next_date = earnings_dates.index[0].date()
+        else:
+            # 2. 失败后尝试 info (info 有时很慢，但在 calendar 挂掉时是救命稻草)
+            # 使用 .get 避免报错
             next_date_str = tick.info.get('nextEarningsDate')
             if next_date_str:
                 next_date = pd.to_datetime(next_date_str).date()
             else:
-                return "⚪ 未知", 999
-        else:
-            next_date = earnings_dates.index[0].date()
-            
-        days_left = (next_date - date.today()).days
-        # ... 后续逻辑不变 ...
+                return "⚪ 无数据", 999
+        
         days_left = (next_date - date.today()).days
         
         if days_left < 0: return "📅 已发布", 0
         if days_left <= 5: return f"🔴 {days_left}天", days_left
         if days_left <= 15: return f"🟡 {days_left}天", days_left
         return f"🟢 {days_left}天", days_left
-    except:
+        
+    except Exception:
         return "⚪ 获取失败", 999
 
 # --- 核心算法 4：技术形态综合研判 ---
