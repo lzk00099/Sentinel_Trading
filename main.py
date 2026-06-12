@@ -2,8 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, date
-import requests
+from yahoo_earnings_calendar import YahooEarningsCalendar
+import datetime
 
 # --- 系统配置常量 ---
 LEVERAGED_ETFS = ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "TNA", "TZA", "NVDL", "FAS", "FAZ"]
@@ -45,38 +45,38 @@ def get_market_structure(ticker, data_5m):
     except: return 0, 0, 0
 
 # --- 增强版数据获取：增加 Session 模拟浏览器 ---
-# 定义一个全局 Session，带上正常的浏览器 User-Agent
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-})
+yec = YahooEarningsCalendar()
 
 def get_earnings_status(ticker_symbol):
+    """
+    使用 yahoo_earnings_calendar 进行财报获取，更加稳定
+    """
     try:
-        # 传入 session 绕过简单的反爬
-        tick = yf.Ticker(ticker_symbol, session=session)
+        # 获取该标的最近的财报数据
+        # 设定一个较大的时间范围以确保能捕捉到
+        earnings_list = yec.get_earnings_of(ticker_symbol)
         
-        # 1. 优先尝试 calendar
-        earnings_dates = tick.calendar
-        if earnings_dates is not None and not earnings_dates.empty:
-            next_date = earnings_dates.index[0].date()
-        else:
-            # 2. 失败后尝试 info (info 有时很慢，但在 calendar 挂掉时是救命稻草)
-            # 使用 .get 避免报错
-            next_date_str = tick.info.get('nextEarningsDate')
-            if next_date_str:
-                next_date = pd.to_datetime(next_date_str).date()
-            else:
-                return "⚪ 无数据", 999
+        if not earnings_list:
+            return "⚪ 无数据", 999
         
-        days_left = (next_date - date.today()).days
+        # 找到最近的一次财报（通常列表是按日期排序的）
+        # 筛选大于今天的最近一次
+        today = datetime.datetime.now()
+        upcoming = [e for e in earnings_list if datetime.datetime.strptime(e['startdatetime'], "%Y-%m-%dT%H:%M:%S.000Z") > today]
         
-        if days_left < 0: return "📅 已发布", 0
+        if not upcoming:
+            return "📅 财报季暂无", 999
+            
+        next_date = datetime.datetime.strptime(upcoming[0]['startdatetime'], "%Y-%m-%dT%H:%M:%S.000Z").date()
+        days_left = (next_date - datetime.date.today()).days
+        
+        if days_left <= 0: return "📅 近期发布", 0
         if days_left <= 5: return f"🔴 {days_left}天", days_left
         if days_left <= 15: return f"🟡 {days_left}天", days_left
         return f"🟢 {days_left}天", days_left
-        
+
     except Exception:
+        # 如果依然失败，直接返回不可用，避免 UI 崩坏
         return "⚪ 获取失败", 999
 
 # --- 核心算法 4：技术形态综合研判 ---
