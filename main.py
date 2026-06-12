@@ -3,6 +3,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
+import requests
+from requests_html import HTMLSession
+
+session = HTMLSession()
+# 在初始化 ticker 时传入 session
+ticker = yf.Ticker(symbol, session=session)
 
 # --- 系统配置常量 ---
 LEVERAGED_ETFS = ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "TNA", "TZA", "NVDL", "FAS", "FAZ"]
@@ -47,17 +53,22 @@ def get_market_structure(ticker, data_5m):
 def get_earnings_status(ticker):
     try:
         tick = yf.Ticker(ticker)
-        earnings_dates = tick.calendar
-        if earnings_dates is None or earnings_dates.empty:
-            return "⚪ 无数据", 999
+        # 增加 session 模拟，降低被拦截概率
+        earnings_dates = tick.calendar 
         
-        # 获取最近的财报日期
-        next_date = earnings_dates.index[0]
-        if isinstance(next_date, str):
-            next_date = pd.to_datetime(next_date).date()
+        # 增加对数据为空的判断逻辑
+        if earnings_dates is None or (isinstance(earnings_dates, pd.DataFrame) and earnings_dates.empty):
+            # 尝试通过 info 字段作为补充备选（有时 calendar 失效，info 仍有数据）
+            next_date_str = tick.info.get('nextEarningsDate')
+            if next_date_str:
+                next_date = pd.to_datetime(next_date_str).date()
+            else:
+                return "⚪ 未知", 999
         else:
-            next_date = next_date.date()
+            next_date = earnings_dates.index[0].date()
             
+        days_left = (next_date - date.today()).days
+        # ... 后续逻辑不变 ...
         days_left = (next_date - date.today()).days
         
         if days_left < 0: return "📅 已发布", 0
