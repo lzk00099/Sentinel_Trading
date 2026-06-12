@@ -3,12 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
-import requests
-from requests_html import HTMLSession
-
-session = HTMLSession()
-# 在初始化 ticker 时传入 session
-ticker = yf.Ticker(symbol, session=session)
 
 # --- 系统配置常量 ---
 LEVERAGED_ETFS = ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "TNA", "TZA", "NVDL", "FAS", "FAZ"]
