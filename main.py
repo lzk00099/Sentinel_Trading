@@ -2,8 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from yahoo_earnings_calendar import YahooEarningsCalendar
 import datetime
+import io
+import os
+import urllib.parse
+import urllib.request
 
 # --- 系统配置常量 ---
 LEVERAGED_ETFS = ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "TNA", "TZA", "NVDL", "FAS", "FAZ"]
@@ -44,40 +47,149 @@ def get_market_structure(ticker, data_5m):
         return round(poc, 2), round(np.ceil((curr_p * 1.03) / step) * step, 2), round(np.floor((curr_p * 0.97) / step) * step, 2)
     except: return 0, 0, 0
 
-# --- 增强版数据获取：增加 Session 模拟浏览器 ---
-yec = YahooEarningsCalendar()
+# --- 核心算法 3：财报预警数据源 ---
+ALPHA_VANTAGE_EARNINGS_URL = "https://www.alphavantage.co/query"
+
+
+def _get_alpha_vantage_key():
+    try:
+        secrets_key = st.secrets.get("ALPHAVANTAGE_API_KEY", "")
+    except Exception:
+        secrets_key = ""
+    return secrets_key or os.getenv("ALPHAVANTAGE_API_KEY", "")
+
+
+def _http_get_text(url, params=None, timeout=10):
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    request = urllib.request.Request(
+        f"{url}{query}",
+        headers={"User-Agent": "SentinelQuantEngine/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _coerce_future_dates(raw_value):
+    today = datetime.date.today()
+    dates = []
+
+    def collect(value):
+        if value is None:
+            return
+        if isinstance(value, pd.DataFrame):
+            collect(value.index)
+            for col in value.columns:
+                collect(value[col])
+            return
+        if isinstance(value, pd.Series):
+            collect(value.index)
+            collect(value.tolist())
+            return
+        if isinstance(value, dict):
+            for dict_value in value.values():
+                collect(dict_value)
+            return
+        if isinstance(value, (list, tuple, set, np.ndarray, pd.Index)):
+            for item in value:
+                collect(item)
+            return
+
+        try:
+            parsed = pd.to_datetime(value, errors="coerce")
+        except Exception:
+            return
+        if pd.isna(parsed):
+            return
+
+        next_date = parsed.date() if hasattr(parsed, "date") else None
+        if next_date and next_date >= today:
+            dates.append(next_date)
+
+    collect(raw_value)
+    return sorted(set(dates))
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _fetch_alpha_vantage_earnings_date(ticker_symbol, api_key):
+    if not api_key:
+        return None
+
+    params = {
+        "function": "EARNINGS_CALENDAR",
+        "symbol": ticker_symbol,
+        "horizon": "3month",
+        "apikey": api_key,
+    }
+    try:
+        csv_text = _http_get_text(ALPHA_VANTAGE_EARNINGS_URL, params=params)
+        if not csv_text.strip() or csv_text.lstrip().startswith("{"):
+            return None
+
+        earnings_df = pd.read_csv(io.StringIO(csv_text))
+        if "reportDate" not in earnings_df.columns:
+            return None
+
+        future_dates = _coerce_future_dates(earnings_df["reportDate"])
+        return future_dates[0] if future_dates else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _fetch_yfinance_earnings_date(ticker_symbol):
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        raw_dates = []
+
+        try:
+            raw_dates.append(ticker.get_earnings_dates(limit=12))
+        except Exception:
+            pass
+
+        try:
+            raw_dates.append(ticker.calendar)
+        except Exception:
+            pass
+
+        future_dates = _coerce_future_dates(raw_dates)
+        return future_dates[0] if future_dates else None
+    except Exception:
+        return None
+
+
+def _format_earnings_status(next_date, source_label):
+    if not next_date:
+        return "⚪ 无数据", 999
+
+    days_left = (next_date - datetime.date.today()).days
+    date_label = next_date.strftime("%m-%d")
+
+    if days_left <= 0:
+        return f"📅 近期发布 ({date_label}, {source_label})", 0
+    if days_left <= 5:
+        return f"🔴 {days_left}天 ({date_label}, {source_label})", days_left
+    if days_left <= 15:
+        return f"🟡 {days_left}天 ({date_label}, {source_label})", days_left
+    return f"🟢 {days_left}天 ({date_label}, {source_label})", days_left
 
 def get_earnings_status(ticker_symbol):
     """
-    使用 yahoo_earnings_calendar 进行财报获取，更加稳定
+    Alpha Vantage 的文档化接口优先；没有 API Key 或接口无数据时，
+    使用 yfinance 作为轻量备选，避免财报预警拖垮主流程。
     """
-    try:
-        # 获取该标的最近的财报数据
-        # 设定一个较大的时间范围以确保能捕捉到
-        earnings_list = yec.get_earnings_of(ticker_symbol)
-        
-        if not earnings_list:
-            return "⚪ 无数据", 999
-        
-        # 找到最近的一次财报（通常列表是按日期排序的）
-        # 筛选大于今天的最近一次
-        today = datetime.datetime.now()
-        upcoming = [e for e in earnings_list if datetime.datetime.strptime(e['startdatetime'], "%Y-%m-%dT%H:%M:%S.000Z") > today]
-        
-        if not upcoming:
-            return "📅 财报季暂无", 999
-            
-        next_date = datetime.datetime.strptime(upcoming[0]['startdatetime'], "%Y-%m-%dT%H:%M:%S.000Z").date()
-        days_left = (next_date - datetime.date.today()).days
-        
-        if days_left <= 0: return "📅 近期发布", 0
-        if days_left <= 5: return f"🔴 {days_left}天", days_left
-        if days_left <= 15: return f"🟡 {days_left}天", days_left
-        return f"🟢 {days_left}天", days_left
+    api_key = _get_alpha_vantage_key()
 
-    except Exception:
-        # 如果依然失败，直接返回不可用，避免 UI 崩坏
-        return "⚪ 获取失败", 999
+    next_date = _fetch_alpha_vantage_earnings_date(ticker_symbol, api_key)
+    if next_date:
+        return _format_earnings_status(next_date, "AV")
+
+    next_date = _fetch_yfinance_earnings_date(ticker_symbol)
+    if next_date:
+        return _format_earnings_status(next_date, "YF备选")
+
+    if not api_key:
+        return "⚪ 无数据/未配AV Key", 999
+    return "⚪ 无数据", 999
 
 # --- 核心算法 4：技术形态综合研判 ---
 def analyze_technical_position(curr_p, vwap, poc, s1, s2, r1, r2, is_div):
@@ -131,8 +243,8 @@ def main():
                     
                     poc, call_w, put_w = get_market_structure(t, data_5m)
                     s1, s2, r1, r2 = calculate_pivots(data_1d, t)
-                    earnings_str, _ = get_earnings_status(t)
                     verdict = analyze_technical_position(curr_p, c_vwap, poc, s1, s2, r1, r2, is_div)
+                    earnings_str, _ = get_earnings_status(t)
                     
                     results.append({
                         "资产": f"{t} {'⚡' if is_leveraged else ''}",
@@ -141,8 +253,8 @@ def main():
                         "量价状态": "⚠️ 背离" if is_div else "✅ 同步",
                         "POC/墙": f"${poc} ({call_w}|{put_w})",
                         "支撑/阻力": f"S:{s1}/{s2} | R:{r1}/{r2}",
-                        "财报预警": earnings_str,
-                        "形态决策": verdict
+                        "形态决策": verdict,
+                        "财报预警": earnings_str
                     })
                 except Exception as e:
                     st.error(f"处理 {t} 时出错: {e}")
